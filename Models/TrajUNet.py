@@ -1,122 +1,64 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from TrajUNetBlocks import *
 import math
-from typing import *
-
-
-class EmbedBlock(nn.Module):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    def __init__(self, max_time: int, feature_dim: int = 128) -> None:
-        super().__init__()
-
-        position = torch.arange(max_time, dtype=torch.float32, device=self.device).unsqueeze(1)    # (max_time, 1)
-        div_term = torch.exp(torch.arange(0, feature_dim, 2, dtype=torch.float32, device=self.device) * -(math.log(1.0e4) / feature_dim))    # (feature_dim / 2)
-        self.pos_enc = torch.zeros((max_time, feature_dim), dtype=torch.float32, device=self.device)    # (max_time, feature_dim)
-        self.pos_enc[:, 0::2] = torch.sin(position * div_term)
-        self.pos_enc[:, 1::2] = torch.cos(position * div_term)
-
-        self.time_embed_layers = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(feature_dim, feature_dim),
-        )
-
-        self.attr_embed_layers = nn.Sequential(
-            nn.Linear(3, feature_dim),  # 3 for travel distance, avg move distance, departure time
-            nn.ReLU(inplace=True),
-            nn.Linear(feature_dim, feature_dim),
-        )
-
-    
-    def forward(self, time: torch.Tensor, attr: torch.Tensor) -> torch.Tensor:
-        time_embed = self.time_embed_layers(self.pos_enc[time, :])    # (B, feature_dim)
-        attr_embed = self.attr_embed_layers(attr)    # (B, feature_dim)
-        return torch.cat([time_embed, attr_embed], dim=1).unsqueeze(2)    # (B, feature_dim*2, 1)
-
-
-class ResnetBlock(nn.Module):
-    def __init__(self, in_c: int, norm_groups: int, embed_dim: int = 256) -> None:
-        super().__init__()
-        self.embed_dim = embed_dim
-
-        # input: (B, in_c, L)
-        self.stage1 = nn.Sequential(
-            nn.GroupNorm(norm_groups, in_c),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(in_c, embed_dim, 3, padding=1),    # (B, in_c, L)
-        )
-
-        self.stage2 = nn.Sequential(
-            nn.GroupNorm(norm_groups, embed_dim),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(embed_dim, in_c, 3, padding=1),    # (B, in_c, L)
-        )
-
-    def forward(self, x: torch.Tensor, time_attr_embed: torch.Tensor) -> None:
-        """
-        :param x: (B, in_c, L)
-        :param time_attr_embed: (B, 256, 1)
-        :return: (B, in_c, L)
-        """
-        return x + self.stage2(self.stage1(x) + time_attr_embed)
-    
-
-class MidAttnBlock(nn.Module):
-    def __init__(self, in_c: int, norm_groups: int) -> None:
-        super().__init__()
-
-        self.res1 = ResnetBlock(in_c, norm_groups)
-
-        self.linear = nn.Conv1d(in_c, in_c*3, 1, 1, 0)    # (B, in_c*3, L)
-
-        self.res2 = ResnetBlock(in_c, norm_groups)
-
-    
-    def forward(self, x: torch.Tensor, time_attr_embed: torch.Tensor) -> None:
-        # input: (B, in_c, L)
-        x = self.res1(x, time_attr_embed)
-        kt, qt, vt = torch.split(self.linear(x), x.shape[1], dim=1)    # (B, in_c, L) * 3
-        attn = torch.softmax((qt.transpose(1, 2) @ kt) / (x.shape[1] ** 0.5), dim=2)    # (B, L, L)
-        x = self.res2((attn @ vt.transpose(1, 2)).transpose(1, 2), time_attr_embed)    # (B, in_c, L)
-        return x
-    
 
 class TrajUNet(nn.Module):
-    def __init__(self, stem_channels: int, diffusion_steps: int, sampling_blocks: int, res_blocks: int) -> None:
+    # stem_channels: 128
+    # diffusion_steps: 300
+    # resolution ratios: 1, 1, 2, 2, 2
+    # resolutions: 2 --stem-> 128 --down-> 128 --down-> 256 --down-> 512 --down-> 1024
+    # sampling_blocks: 4
+    def __init__(self, channel_schedule: List[int], diffusion_steps: int = 300, res_blocks: int = 2) -> None:
         super().__init__()
 
-        self.sampling_blocks = sampling_blocks
+        self.channel_schedule = channel_schedule
+        self.stages = len(channel_schedule) - 1
         self.res_blocks = res_blocks
 
+        # Time and Attribute Embedding
         self.embed_block = EmbedBlock(diffusion_steps, 128)
 
-        self.stem = nn.Conv1d(2, stem_channels, 3, 1, 1)    # (B, stem_channels, L)
+        # Create First layer for UNet
+        self.stem = nn.Conv1d(2, channel_schedule[0], 3, 1, 1)    # (B, stem_channels, L)
 
-        self.down_blocks = nn.ModuleList([self.__makeEncoderStage(stem_channels * 2 ** i) for i in range(sampling_blocks)])
+        # Create Encoder (Down sampling) Blocks for UNet
+        in_channels = channel_schedule[:-1]
+        out_channels = channel_schedule[1:]
+        self.down_blocks = nn.ModuleList()
+        for i in range(self.stages):
+            self.down_blocks.append(self.__makeEncoderStage(in_channels[i], out_channels[i]))
 
-        self.mid_attn_block = MidAttnBlock(stem_channels * 2 ** sampling_blocks, 32)
+        # Create Middle Attention Block for UNet
+        self.mid_attn_block = AttnBlock(out_channels[-1], norm_groups=32)
 
-        self.up_blocks = nn.ModuleList([self.__makeDecoderStage(stem_channels * 2 ** (sampling_blocks - i)) for i in range(sampling_blocks)])
+        # Create Decoder (Up sampling) Blocks for UNet
+        self.up_blocks = nn.ModuleList()
+        # reverse the channel schedule
+        in_channels = channel_schedule[-1:0:-1]
+        out_channels = channel_schedule[-2::-1]
+        for i in range(self.stages):
+            self.up_blocks.append(self.__makeDecoderStage(in_channels[i] * 2, out_channels[i]))
 
-        self.head = nn.Conv1d(stem_channels, 2, 3, 1, 1)    # (B, 2, L)
+        # Create last for UNet
+        self.head = nn.Sequential(
+            nn.GroupNorm(32, channel_schedule[0]),
+            nn.Conv1d(channel_schedule[0], 2, 3, 1, 1)  # (B, 2, L)
+        )
 
 
-    def __makeEncoderStage(self, channels: int, expand_ratio: int = 2) -> nn.ModuleList:
-        layers = []
-        for i in range(self.res_blocks):
-            layers.append(ResnetBlock(channels, 1))
-        layers.append(nn.Conv1d(channels, channels*expand_ratio, 3, 2, 1))     # downsample
+    def __makeEncoderStage(self, in_c: int, out_c: int) -> nn.ModuleList:
+        layers = [ResnetBlock(in_c, out_c, norm_groups=32)]
+        for i in range(self.res_blocks - 1):
+            layers.append(ResnetBlock(out_c, norm_groups=32))
+        layers.append(nn.Conv1d(out_c, out_c, 3, 2, 1))     # downsample
         return nn.ModuleList(layers)
     
 
-    def __makeDecoderStage(self, channels: int, shrink_ratio: int = 2) -> nn.ModuleList:
-        layers = []
-        layers.append(nn.Conv1d(channels*2, channels, 3, 1, 1))   # fuse
-        for i in range(self.res_blocks):
-            layers.append(ResnetBlock(channels, 1))
-        layers.append(nn.Upsample(scale_factor=2, mode='linear', align_corners=True))    # upsample
-        layers.append(nn.Conv1d(channels, channels//shrink_ratio, 3, 1, 1))    # shrink
+    def __makeDecoderStage(self, in_c: int, out_c: int) -> nn.ModuleList:
+        layers = [ResnetBlock(in_c, out_c, norm_groups=32)]     # fuse with skip connection
+        for i in range(self.res_blocks - 1):
+            layers.append(ResnetBlock(out_c, norm_groups=32))
+        layers.append(nn.Upsample(scale_factor=2, mode='nearest'))    # upsample
+        layers.append(nn.Conv1d(out_c, out_c, 3, 1, 1))    # shrink
         return nn.ModuleList(layers)
     
 
@@ -146,8 +88,7 @@ class TrajUNet(nn.Module):
         for i, up_stage in enumerate(self.up_blocks):
             # fuse with skip connection
             x = torch.cat([x, down_outputs[-i-1]], dim=1)   # (B, C*2, L//2**i)
-            x = up_stage[0](x)
-            for layer in up_stage[1:-2]:
+            for layer in up_stage[:-2]:
                 x = layer(x, time_attr_embed)
             x = up_stage[-2](x)
             x = up_stage[-1](x)
@@ -170,7 +111,7 @@ class TrajUNet(nn.Module):
     
 
 if __name__ == "__main__":
-    model = TrajUNet(stem_channels=32, diffusion_steps=300, sampling_blocks=4, res_blocks=2).cuda()
+    model = TrajUNet(channel_schedule=[128, 128, 256, 512, 1024], diffusion_steps=300, res_blocks=2).cuda()
     x = torch.randn(1, 2, 128).cuda()
     time = torch.tensor([0,], dtype=torch.long, device='cuda')
     attr = torch.randn(1, 3).cuda()
