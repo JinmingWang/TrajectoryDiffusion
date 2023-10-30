@@ -32,6 +32,9 @@ class MovingAverage:
     def __format__(self, format_spec: str) -> str:
         return self.window.mean().__format__(format_spec)
 
+    def __float__(self) -> float:
+        return float(self.window.mean())
+
 if __name__ =="__main__":
     ma = MovingAverage(5)
     for i in range(10):
