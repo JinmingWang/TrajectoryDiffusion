@@ -1,5 +1,4 @@
-from TrajUNetBlocks import *
-import math
+from Models.TrajUNetBlocks import *
 
 class TrajUNet(nn.Module):
     # stem_channels: 128
@@ -7,7 +6,7 @@ class TrajUNet(nn.Module):
     # resolution ratios: 1, 1, 2, 2, 2
     # resolutions: 2 --stem-> 128 --down-> 128 --down-> 256 --down-> 512 --down-> 1024
     # sampling_blocks: 4
-    def __init__(self, channel_schedule: List[int], diffusion_steps: int = 300, res_blocks: int = 2) -> None:
+    def __init__(self, channel_schedule: List[int], traj_length: int = 200, diffusion_steps: int = 300, res_blocks: int = 2) -> None:
         super().__init__()
 
         self.channel_schedule = channel_schedule
@@ -23,9 +22,11 @@ class TrajUNet(nn.Module):
         # Create Encoder (Down sampling) Blocks for UNet
         in_channels = channel_schedule[:-1]
         out_channels = channel_schedule[1:]
+        traj_lengths = [traj_length]
         self.down_blocks = nn.ModuleList()
         for i in range(self.stages):
             self.down_blocks.append(self.__makeEncoderStage(in_channels[i], out_channels[i]))
+            traj_lengths.append(traj_lengths[-1] // 2)
 
         # Create Middle Attention Block for UNet
         self.mid_attn_block = AttnBlock(out_channels[-1], norm_groups=32)
@@ -35,8 +36,9 @@ class TrajUNet(nn.Module):
         # reverse the channel schedule
         in_channels = channel_schedule[-1:0:-1]
         out_channels = channel_schedule[-2::-1]
+        upsample_targets = traj_lengths[-2::-1]
         for i in range(self.stages):
-            self.up_blocks.append(self.__makeDecoderStage(in_channels[i] * 2, out_channels[i]))
+            self.up_blocks.append(self.__makeDecoderStage(in_channels[i] * 2, out_channels[i], upsample_targets[i]))
 
         # Create last for UNet
         self.head = nn.Sequential(
@@ -53,11 +55,11 @@ class TrajUNet(nn.Module):
         return nn.ModuleList(layers)
     
 
-    def __makeDecoderStage(self, in_c: int, out_c: int) -> nn.ModuleList:
+    def __makeDecoderStage(self, in_c: int, out_c: int, upsample_size: int) -> nn.ModuleList:
         layers = [ResnetBlock(in_c, out_c, norm_groups=32)]     # fuse with skip connection
         for i in range(self.res_blocks - 1):
             layers.append(ResnetBlock(out_c, norm_groups=32))
-        layers.append(nn.Upsample(scale_factor=2, mode='nearest'))    # upsample
+        layers.append(nn.Upsample(size=upsample_size, mode='nearest'))    # upsample
         layers.append(nn.Conv1d(out_c, out_c, 3, 1, 1))    # shrink
         return nn.ModuleList(layers)
     
@@ -111,8 +113,8 @@ class TrajUNet(nn.Module):
     
 
 if __name__ == "__main__":
-    model = TrajUNet(channel_schedule=[128, 128, 256, 512, 1024], diffusion_steps=300, res_blocks=2).cuda()
-    x = torch.randn(1, 2, 128).cuda()
+    model = TrajUNet(channel_schedule=[128, 128, 256, 512, 1024], traj_length=200, diffusion_steps=300, res_blocks=2).cuda()
+    x = torch.randn(1, 2, 200).cuda()
     time = torch.tensor([0,], dtype=torch.long, device='cuda')
     attr = torch.randn(1, 3).cuda()
     y = model(x, time, attr)

@@ -29,11 +29,13 @@ class EmbedBlock(nn.Module):
             nn.Linear(feature_dim, feature_dim),
         )
 
+        self.final_act = Swish()
+
 
     def forward(self, time: torch.Tensor, attr: torch.Tensor) -> torch.Tensor:
         time_embed = self.time_embed_layers(self.pos_enc[time, :])  # (B, feature_dim)
         attr_embed = self.attr_embed_layers(attr)  # (B, feature_dim)
-        return torch.cat([time_embed, attr_embed], dim=1).unsqueeze(2)  # (B, feature_dim*2, 1)
+        return self.final_act(torch.cat([time_embed, attr_embed], dim=1).unsqueeze(2))  # (B, feature_dim*2, 1)
 
 
 class ResnetBlock(nn.Module):
@@ -51,10 +53,7 @@ class ResnetBlock(nn.Module):
             nn.Conv1d(in_c, out_c, 3, padding=1),  # (B, in_c, L)
         )
 
-        self.embed_proj = nn.Sequential(
-            Swish(),
-            nn.Conv1d(embed_dim, out_c, 1, padding=0),  # (B, embed_dim, L)
-        )
+        self.embed_proj = nn.Conv1d(embed_dim, out_c, 1, padding=0)  # (B, embed_dim, L)
 
         self.stage2 = nn.Sequential(
             nn.GroupNorm(norm_groups, out_c, eps=1e-6),
