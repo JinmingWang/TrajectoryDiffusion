@@ -12,33 +12,42 @@ import random
 
 
 class DidiTrajectoryDataset(data.Dataset):
+    Unix_time_20161001 = 1475276400
+    seconds_per_day = 86400
+    Unix_time_20161101 = 1477958400
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    def __init__(self, dataset_root: str, traj_length: int, lat_mean: float, lat_std: float, lon_mean: float, lon_std: float):
+    def __init__(self, dataset_root: str, traj_length: int, feature_mean: List[float], feature_std: List[float]):
         """
         滴滴 Trajectory Dataset, contains 成都 and 西安 datasets
 
         The processed dataset folder contains many gps_YYYYMMDD.pt files
         They record trajectories of all orders in that day, formatted as:
 
-        {
-            order_0: (driver_id, trajectory),
-            order_1: (driver_id, trajectory),
+        [
+            (driver_id, order_id, lon_lat_tensor, time_tensor),
+            (driver_id, order_id, lon_lat_tensor, time_tensor),
             ...
-        }
+        ]
 
-        trajectory is torch.Tensor of shape (N, 3), 3 features are (time, lat, lon)
-
+        lon_lat_tensor: (N, 2) torch.float64
+        time_tensor: (N,) torch.long
 
         :param dataset_root: The path to the folder containing gps_YYYYMMDD.pt files
         :param traj_length: shorter: not included, longer: included but cropped
-        :param lat_mean: The mean of latitude
-        :param lat_std: The std of latitude
-        :param lon_mean: The mean of longitude
-        :param lon_std: The std of longitude
+        :param feature_mean: The mean of time&lon&lat
+        :param feature_std: The std of time&lon&lat
         """
 
-        self.traj_mean = torch.tensor([lat_mean, lon_mean], dtype=torch.float32, device=self.device).view(2, 1)
-        self.traj_std = torch.tensor([lat_std, lon_std], dtype=torch.float32, device=self.device).view(2, 1)
+        if "oct" in dataset_root:
+            self.time_shift = self.Unix_time_20161001
+        elif "nov" in dataset_root:
+            self.time_shift = self.Unix_time_20161101
+        else:
+            raise ValueError(f"dataset_root should contain 'oct' or 'nov', but got {dataset_root}")
+
+        self.traj_mean = torch.tensor(feature_mean, dtype=torch.float32, device=self.device).view(1, 3)
+        self.traj_std = torch.tensor(feature_std, dtype=torch.float32, device=self.device).view(1, 3)
 
         self.dataset_root = dataset_root
         self.file_paths = [os.path.join(dataset_root, file) for file in os.listdir(dataset_root) if file.endswith('.pt')]
@@ -62,13 +71,14 @@ class DidiTrajectoryDataset(data.Dataset):
                 break
             file_path = self.file_paths[self.part_idx]
             print(f'Loading {file_path}')
-            with open(file_path, 'rb') as f:
-                raw_dataset_part = torch.load(f)
+            raw_dataset_part = torch.load(file_path)
 
-            for v in raw_dataset_part.values():
-                driver_id, traj = v
-                if len(traj) >= self.traj_length:
-                    self.dataset_part.append(traj[:self.traj_length])   # Crop
+            for (_, _, lon_lat_tensor, time_tensor) in raw_dataset_part:
+                if lon_lat_tensor.shape[0] >= self.traj_length:
+                    self.dataset_part.append((
+                        lon_lat_tensor[:self.traj_length].to(torch.float32),
+                        ((time_tensor[:self.traj_length] - self.time_shift) / 60).to(torch.float32),
+                    ))
 
             self.part_idx += 1
 
@@ -88,15 +98,21 @@ class DidiTrajectoryDataset(data.Dataset):
     def __getitem__(self, index: Any) -> Any:
         """
         :param index: The index of the trajectory in dataset_part
-        :return: A trajectory of shape (2, N), 2 features are (lat, lon)
+        :return: lon_lat: (2, N), attr: (3,), times: (N,)
         """
-        traj = self.dataset_part[index][:, 1:].to(self.device)     # exclude time feature
-        travel_distance = torch.sqrt(torch.sum((traj[1:] - traj[:-1]) ** 2, dim=1)).sum()   # the length of the trajectory
-        avg_move_distance = travel_distance / (len(traj) - 1)
-        departure_time = self.dataset_part[index][0, 0]     # the departure time of the trajectory
-        attr = torch.tensor([travel_distance, avg_move_distance, departure_time], dtype=torch.float32, device=self.device)
-        traj = traj.transpose(0, 1).contiguous()
-        return (traj - self.traj_mean) / self.traj_std, attr
+        lon_lat, times = self.dataset_part[index]
+        times = (times.to(self.device) - self.traj_mean[:, 0]) / self.traj_std[:, 0]
+
+        traj_length = torch.sqrt(torch.sum((lon_lat[1:] - lon_lat[:-1]) ** 2, dim=1)).sum()   # the length of the trajectory
+        traj_length = traj_length / self.traj_std[:, 1:].sum()
+
+        avg_move_distance = traj_length / (len(lon_lat) - 1)
+        departure_time = times[0]     # the departure time of the trajectory
+        attr = torch.tensor([traj_length, avg_move_distance, departure_time], dtype=torch.float32, device=self.device)
+
+        lon_lat = (lon_lat.to(self.device) - self.traj_mean[:, 1:]) / self.traj_std[:, 1:]
+        lon_lat = lon_lat.transpose(0, 1).to(torch.float32).contiguous()    # (N, 2) -> (2, N)
+        return lon_lat, attr, times.to(torch.float32)
         
 
     @property
@@ -104,19 +120,19 @@ class DidiTrajectoryDataset(data.Dataset):
         return len(self.file_paths)
     
 
-def collectFunc(batch: List[Tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
+def collectFunc(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     :param batch: A list of trajectories and attributes
-    :return: A tensor of shape (B, 2, N) and a tensor of shape (B, 3)
+    :return: lon_lat: (B, 2, N), attr: (B, 3), times: (B, N)
     """
-    traj_list, attr_list = zip(*batch)
-    return torch.stack(traj_list, dim=0), torch.stack(attr_list, dim=0)
+    traj_list, attr_list, time_list = zip(*batch)
+    return torch.stack(traj_list, dim=0), torch.stack(attr_list, dim=0), torch.stack(time_list, dim=0)
 
 
 if __name__ == "__main__":
-    dataset = DidiTrajectoryDataset('E:/Data/Didi/xian/nov', traj_length=120)
+    dataset = DidiTrajectoryDataset('E:/Data/Didi/chengdu/nov', traj_length=120, feature_mean=[0, 0, 0], feature_std=[1, 1, 1])
     dataset.loadNextFiles(1)
     print(len(dataset))
-    print(dataset[0][0].shape)
-    print(dataset[1][1].shape)
-    print(dataset[2][0].shape)
+    print(dataset[0][0])
+    print(dataset[1][1])
+    print(dataset[2][2])
