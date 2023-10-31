@@ -1,16 +1,33 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
+
 
 def saveModel(model:torch.nn.Module, path: str) -> None:
     torch.save(model.state_dict(), path)
 
+
 def loadModel(model:torch.nn.Module, path: str) -> None:
     model.load_state_dict(torch.load(path))
+
 
 def exportONNX(model: torch.nn.Module, sample_inputs: list[torch.Tensor], path: str) -> None:
     model.eval()
     torch.onnx.export(model, sample_inputs, path, verbose=True, opset_version=13, 
                       input_names=['input_traj', "time", "attr"], output_names=['output_traj'])
+    
+
+def visualizeTraj(traj: torch.Tensor) -> None:
+    """ draw trajectory
+
+    :param traj: trajectory to draw, shape: (2, N) for lat lon
+    :return: None
+    """
+    plt.xlabel('longitude')
+    plt.ylabel('latitude')
+    plt.plot(traj[0], traj[1], color='blue', marker='o', linestyle='solid', linewidth=1, markersize=1)
+    plt.show()
+
 
 
 class MovingAverage:
