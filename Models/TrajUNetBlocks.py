@@ -2,39 +2,63 @@ from Models.ModelUtils import *
 import math
 
 
-class EmbedBlock(nn.Module):
+class WideAndDeepEmbedBlock(nn.Module):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-    def __init__(self, max_time: int, feature_dim: int = 128) -> None:
+    def __init__(self, max_time: int, hidden_dim: int = 256, embed_dim: int = 128) -> None:
         super().__init__()
 
         position = torch.arange(max_time, dtype=torch.float32, device=self.device).unsqueeze(1)  # (max_time, 1)
-        div_term = torch.exp(torch.arange(0, feature_dim, 2, dtype=torch.float32, device=self.device) * -(
-                    math.log(1.0e4) / feature_dim))  # (feature_dim / 2)
-        self.pos_enc = torch.zeros((max_time, feature_dim), dtype=torch.float32,
+        div_term = torch.exp(torch.arange(0, embed_dim, 2, dtype=torch.float32, device=self.device) * -(
+                math.log(1.0e4) / embed_dim))  # (feature_dim / 2)
+        self.pos_enc = torch.zeros((max_time, embed_dim), dtype=torch.float32,
                                    device=self.device)  # (max_time, feature_dim)
         self.pos_enc[:, 0::2] = torch.sin(position * div_term)
         self.pos_enc[:, 1::2] = torch.cos(position * div_term)
 
         self.time_embed_layers = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(feature_dim, feature_dim),
+            nn.Linear(embed_dim, embed_dim),
+            nn.LeakyReLU(inplace=True, negative_slope=0.1),
+            nn.Linear(embed_dim, embed_dim),
         )
 
-        self.attr_embed_layers = nn.Sequential(
-            nn.Linear(3, feature_dim),  # 3 for travel distance, avg move distance, departure time
-            nn.ReLU(inplace=True),
-            nn.Linear(feature_dim, feature_dim),
+        # Embedder for categorical attributes
+        self.cell_index_embedder = nn.Embedding(256, hidden_dim)  # 256 cells in lon & lat ->
+        self.day_embedder = nn.Embedding(33, hidden_dim)  # 31 days a month
+        self.categorical_fc = nn.Linear(5 * hidden_dim, 3 * hidden_dim)
+
+
+        # Embedder for numerical attributes
+        self.wide_fc = nn.Linear(3, hidden_dim)  # 3 for depart_time, traj_length, avg_move_distance
+
+        self.deep_fc = nn.Sequential(
+            nn.LeakyReLU(inplace=True, negative_slope=0.1),
+            nn.Linear(4 * hidden_dim, 2 * hidden_dim),
+            nn.LeakyReLU(inplace=True, negative_slope=0.1),
+            nn.Linear(2 * hidden_dim, embed_dim),
         )
 
         self.final_act = Swish()
 
 
-    def forward(self, time: torch.Tensor, attr: torch.Tensor) -> torch.Tensor:
+    def forward(self, time: torch.Tensor, cat_attr: torch.Tensor, num_attr: torch.Tensor) -> torch.Tensor:
+        """
+
+        :param time: (B, )
+        :param cat_attr: (B, 5) [start_lon, start_lat, end_lon, end_lat, day]
+        :param num_attr: (B, 3) [depart_time, traj_length, avg_move_distance]
+        :return:
+        """
         time_embed = self.time_embed_layers(self.pos_enc[time, :])  # (B, feature_dim)
-        attr_embed = self.attr_embed_layers(attr)  # (B, feature_dim)
+        cell_embed = self.cell_index_embedder(cat_attr[:, :-1]).flatten(1)  # (B, 4*hidden_dim)
+        day_embed = self.day_embedder(cat_attr[:, -1]) # (B, hidden_dim)
+        cat_embed = self.categorical_fc(torch.cat([cell_embed, day_embed], dim=1))  # (B, 3*hidden_dim)
+
+        num_embed = self.wide_fc(num_attr)  # (B, hidden_dim)
+
+        attr_embed = self.deep_fc(torch.cat([cat_embed, num_embed], dim=1))  # (B, feature_dim)
+
         return self.final_act(torch.cat([time_embed, attr_embed], dim=1).unsqueeze(2))  # (B, feature_dim*2, 1)
 
 
@@ -53,7 +77,7 @@ class ResnetBlock(nn.Module):
             nn.Conv1d(in_c, out_c, 3, padding=1),  # (B, in_c, L)
         )
 
-        self.embed_proj = nn.Conv1d(embed_dim, out_c, 1, padding=0)  # (B, embed_dim, L)
+        self.embed_proj = nn.Conv1d(embed_dim, out_c, 1, padding=0)  # (B, embed_dim, 1)
 
         self.stage2 = nn.Sequential(
             nn.GroupNorm(norm_groups, out_c, eps=1e-6),

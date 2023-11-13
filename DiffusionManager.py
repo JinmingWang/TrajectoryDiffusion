@@ -34,34 +34,39 @@ class DiffusionManager:
     def diffusionBackwardStep(self, x_t: torch.Tensor, t: int, epsilon_pred: torch.Tensor):
         """
         Backward Diffusion Process
-        :param x_t: input images (1, C, L)
+        :param x_t: input images (B, C, L)
         :param t: time steps
-        :param epsilon_pred: predicted noise (1, C, L)
+        :param epsilon_pred: predicted noise (B, C, L)
         :param scaling_factor: scaling factor of noise
-        :return: x_t-1: output images (1, C, L)
+        :return: x_t-1: output images (B, C, L)
         """
-        mu = (x_t - self.betas[t:t+1] / self.sqrt_1_minus_alphas_bars[t:t+1] * epsilon_pred) / torch.sqrt(self.alphas[t:t+1])
+        beta = self.betas[t].view(-1, 1, 1)
+        alpha = self.alphas[t].view(-1, 1, 1)
+        sqrt_1_minus_alpha_bar = self.sqrt_1_minus_alphas_bars[t].view(-1, 1, 1)
+
+        mu = (x_t - beta / sqrt_1_minus_alpha_bar * epsilon_pred) / torch.sqrt(alpha)
         if t == 0:
             return mu
         else:
-            stds = torch.sqrt(self.betas[t:t+1]) * torch.randn_like(x_t)
+            stds = torch.sqrt(beta) * torch.randn_like(x_t)
             return mu + stds
 
     @torch.no_grad()
-    def diffusionBackward(self, x_T: torch.Tensor, model: torch.nn.Module, max_t: int = None):
+    def diffusionBackward(self, x_T: torch.Tensor, cat_attr: torch.Tensor, num_attr: torch.Tensor, model: torch.nn.Module, max_t: int = None):
         """
         Backward Diffusion Process
-        :param x_T: input (1, C, L)
+        :param x_T: input (B, C, L)
         :param model: model to predict noise
         :param max_t: maximum time step
-        :return: x_0: output (1, C, L)
+        :return: x_0: output (B, C, L)
         """
         if max_t is None:
             max_t = self.T
+        B = x_T.shape[0]
         x_t = x_T
+        tensor_t = torch.arange(max_t, dtype=torch.long, device=x_t.device).repeat(B, 1)  # (B, T)
         for t in range(max_t - 1, -1, -1):
-            tensor_t = torch.tensor([t], dtype=torch.long, device=x_t.device)     # (1, 1)
-            epsilon_pred = model(x_t, tensor_t)
+            epsilon_pred = model(x_t, tensor_t[:, t], cat_attr, num_attr)  # epsilon_pred: (B, C, L)
             x_t = self.diffusionBackwardStep(x_t, t, epsilon_pred)
             # if t % 10 == 0:
             #     x_np = x_t.squeeze().cpu().numpy()

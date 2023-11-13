@@ -14,7 +14,7 @@ class TrajUNet(nn.Module):
         self.res_blocks = res_blocks
 
         # Time and Attribute Embedding
-        self.embed_block = EmbedBlock(diffusion_steps, 128)
+        self.embed_block = WideAndDeepEmbedBlock(diffusion_steps, hidden_dim=256, embed_dim=128)
 
         # Create First layer for UNet
         self.stem = nn.Conv1d(2, channel_schedule[0], 3, 1, 1)    # (B, stem_channels, L)
@@ -64,26 +64,26 @@ class TrajUNet(nn.Module):
         return nn.ModuleList(layers)
     
 
-    def __encoderForward(self, x: torch.Tensor, time_attr_embed: torch.Tensor) -> List[torch.Tensor]:
+    def __encoderForward(self, x: torch.Tensor, embedding: torch.Tensor) -> List[torch.Tensor]:
         """
         :param x: (B, stem_channels, L)
-        :param time_attr_embed: (B, 256, 1)
+        :param embedding: (B, 256, 1)
         :return: List of (B, C', L//2**i)
         """
 
         outputs = []
         for down_stage in self.down_blocks:
             for layer in down_stage[:-1]:
-                x = layer(x, time_attr_embed)    # (B, C, L) -> (B, C, L)
+                x = layer(x, embedding)    # (B, C, L) -> (B, C, L)
             x = down_stage[-1](x)   # downsample
             outputs.append(x)
         return outputs
     
 
-    def __decoderForward(self, x: torch.Tensor, time_attr_embed: torch.Tensor, down_outputs: List[torch.Tensor]) -> torch.Tensor:
+    def __decoderForward(self, x: torch.Tensor, embedding: torch.Tensor, down_outputs: List[torch.Tensor]) -> torch.Tensor:
         """
         :param x: (B, C', L//2**i)
-        :param time_attr_embed: (B, 256, 1)
+        :param embedding: (B, 256, 1)
         :param down_outputs: List of (B, C', L//2**i)
         :return: (B, C, L)
         """
@@ -91,24 +91,25 @@ class TrajUNet(nn.Module):
             # fuse with skip connection
             x = torch.cat([x, down_outputs[-i-1]], dim=1)   # (B, C*2, L//2**i)
             for layer in up_stage[:-2]:
-                x = layer(x, time_attr_embed)
+                x = layer(x, embedding)
             x = up_stage[-2](x)
             x = up_stage[-1](x)
         return x
     
 
-    def forward(self, x: torch.Tensor, time: torch.Tensor, attr: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, time: torch.Tensor, cat_attr: torch.Tensor, num_attr: torch.Tensor) -> torch.Tensor:
         """
         :param x: (B, 2, L)
         :param time: (B, )
-        :param attr: (B, 3)
+        :param cat_attr: (B, 5)
+        :param num_attr: (B, 3)
         :return: (B, 2, L)
         """
-        time_attr_embed = self.embed_block(time, attr)    # (B, 256, 1)
+        embedding = self.embed_block(time, cat_attr, num_attr)    # (B, 256, 1)
         x = self.stem(x)    # (B, stem_channels, L)
-        down_outputs = self.__encoderForward(x, time_attr_embed)    # List of (B, C', L//2**i)
-        x = self.mid_attn_block(down_outputs[-1], time_attr_embed)    # (B, C', L//2**i)
-        x = self.__decoderForward(x, time_attr_embed, down_outputs)    # (B, C, L)
+        down_outputs = self.__encoderForward(x, embedding)    # List of (B, C', L//2**i)
+        x = self.mid_attn_block(down_outputs[-1], embedding)    # (B, C', L//2**i)
+        x = self.__decoderForward(x, embedding, down_outputs)    # (B, C, L)
         return self.head(x)
     
 
@@ -116,8 +117,9 @@ if __name__ == "__main__":
     model = TrajUNet(channel_schedule=[128, 128, 256, 512, 1024], traj_length=200, diffusion_steps=300, res_blocks=2).cuda()
     x = torch.randn(1, 2, 200).cuda()
     time = torch.tensor([0,], dtype=torch.long, device='cuda')
-    attr = torch.randn(1, 3).cuda()
-    y = model(x, time, attr)
+    cat_attr = torch.tensor([[0, 0, 0, 0, 0],], dtype=torch.long, device='cuda')
+    num_attr = torch.tensor([[0, 0, 0],], dtype=torch.float, device='cuda')
+    y = model(x, time, cat_attr, num_attr)
     print(y.shape)
 
 
