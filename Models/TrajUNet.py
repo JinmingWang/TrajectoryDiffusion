@@ -1,5 +1,6 @@
 from Models.TrajUNetBlocks import *
 
+# 11.169695 ms
 class TrajUNet(nn.Module):
     # stem_channels: 128
     # diffusion_steps: 300
@@ -121,6 +122,8 @@ if __name__ == "__main__":
     num_attr = torch.tensor([[0, 0, 0],], dtype=torch.float, device='cuda')
     y = model(x, time, cat_attr, num_attr)
     print(y.shape)
+
+    inferSpeedTest1K(model, x, time, cat_attr, num_attr)
 
 
 

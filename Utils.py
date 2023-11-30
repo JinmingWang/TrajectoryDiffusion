@@ -36,6 +36,30 @@ def visualizeTraj(lon_lat: torch.Tensor, times: torch.Tensor, draw_dot: bool = T
         plt.scatter(lon_lat[0, :].cpu(), lon_lat[1, :].cpu(), c=times.cpu(), cmap='rainbow', s=0.5)
 
 
+def renderTrajRecovery(traj: torch.Tensor, recover_traj: torch.Tensor, no_noise_recovery: torch.Tensor = None) -> plt.figure:
+    # traj: (2, traj_length)
+    # recover_traj: (2, traj_length)
+
+    # draw original trajectory
+    plt.subplot(1, 3, 1)
+    plt.title("original")
+    visualizeTraj(traj.detach(), torch.arange(traj.shape[1]))
+
+    # draw recovered trajectory
+    plt.subplot(1, 3, 2)
+    plt.title("rec(noise)")
+    visualizeTraj(recover_traj.detach(), torch.arange(traj.shape[1]))
+
+    plt.subplot(1, 3, 3)
+    plt.title("rec(no noise)")
+    visualizeTraj(no_noise_recovery.detach(), torch.arange(traj.shape[1]))
+
+    # render the figure and return the image as numpy array
+    plt.tight_layout()
+
+    return plt.gcf()
+
+
 
 class MovingAverage:
     def __init__(self, window_size: int) -> None:
@@ -84,8 +108,12 @@ class EMA:
         return self.ema_model
 
 
-if __name__ =="__main__":
-    ma = MovingAverage(5)
-    for i in range(10):
-        ma << i
-        print(f"{ma:.4f}")
+# if __name__ =="__main__":
+#     import cv2
+#     traj = torch.arange(0, 10, 0.1).reshape(2, 50) + torch.randn(2, 50) * 0.1
+#     recover_traj = traj + torch.randn(2, 50) * 0.3
+#     plot = renderTrajRecovery(traj, recover_traj)
+#     plt.show()
+#
+#     cv2.imshow("test", plot)
+#     cv2.waitKey(0)

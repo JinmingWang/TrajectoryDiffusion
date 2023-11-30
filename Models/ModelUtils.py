@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import *
+from tqdm import tqdm
+import time
 
 class Swish(nn.Module):
     def __init__(self):
@@ -26,6 +28,20 @@ class ConvNormAct(nn.Sequential):
         """
         super(ConvNormAct, self).__init__(
             nn.Conv1d(in_c, out_c, k, s, p, d, g, bias=False),
-            nn.GroupNorm(32, out_c, eps=1e-6),
+            nn.BatchNorm1d(out_c),
             Swish()
         )
+
+
+def inferSpeedTest1K(model, *dummy_inputs):
+    model.eval()
+    start = time.time()
+    with torch.no_grad():
+        if len(dummy_inputs) == 1:
+            for i in tqdm(range(1000)):
+                model(dummy_inputs[0])
+        else:
+            for i in tqdm(range(1000)):
+                model(*dummy_inputs)
+    end = time.time()
+    print(f"Each inference takes {end - start:.6f} ms")

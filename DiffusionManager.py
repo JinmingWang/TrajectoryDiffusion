@@ -3,8 +3,11 @@ from typing import *
 # import cv2
 
 class DiffusionManager:
-    def __init__(self, min_beta: float = 0.0001, max_beta: float = 0.002, max_diffusion_step: int = 100, device: str = 'cuda'):
-        betas = torch.linspace(min_beta, max_beta, max_diffusion_step).to(device)
+    def __init__(self, min_beta: float = 0.0001, max_beta: float = 0.002, max_diffusion_step: int = 100, device: str = 'cuda', scaled_linear:bool=False):
+        if scaled_linear:
+            betas = torch.linspace(min_beta**0.5, max_beta**0.5, max_diffusion_step).to(device) ** 2
+        else:
+            betas = torch.linspace(min_beta, max_beta, max_diffusion_step).to(device)
         alphas = 1 - betas
         alpha_bars = torch.empty_like(alphas)
         product = 1
