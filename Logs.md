@@ -1,2 +1,0 @@
-# 2023-10-30
-- In the original design, time+attr embedding is passed to ResnetBlock, going through Swish, Conv1d then inserted to the middle. But this Swish can be moved to the embedding layer, so we only do it once.

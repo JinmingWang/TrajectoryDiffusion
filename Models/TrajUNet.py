@@ -23,11 +23,9 @@ class TrajUNet(nn.Module):
         # Create Encoder (Down sampling) Blocks for UNet
         in_channels = channel_schedule[:-1]
         out_channels = channel_schedule[1:]
-        traj_lengths = [traj_length]
         self.down_blocks = nn.ModuleList()
         for i in range(self.stages):
             self.down_blocks.append(self.__makeEncoderStage(in_channels[i], out_channels[i]))
-            traj_lengths.append(traj_lengths[-1] // 2)
 
         # Create Middle Attention Block for UNet
         self.mid_attn_block = AttnBlock(out_channels[-1], norm_groups=32)
@@ -37,9 +35,8 @@ class TrajUNet(nn.Module):
         # reverse the channel schedule
         in_channels = channel_schedule[-1:0:-1]
         out_channels = channel_schedule[-2::-1]
-        upsample_targets = traj_lengths[-2::-1]
         for i in range(self.stages):
-            self.up_blocks.append(self.__makeDecoderStage(in_channels[i] * 2, out_channels[i], upsample_targets[i]))
+            self.up_blocks.append(self.__makeDecoderStage(in_channels[i] * 2, out_channels[i]))
 
         # Create last for UNet
         self.head = nn.Sequential(
@@ -56,11 +53,11 @@ class TrajUNet(nn.Module):
         return nn.ModuleList(layers)
     
 
-    def __makeDecoderStage(self, in_c: int, out_c: int, upsample_size: int) -> nn.ModuleList:
+    def __makeDecoderStage(self, in_c: int, out_c: int) -> nn.ModuleList:
         layers = [ResnetBlock(in_c, out_c, norm_groups=32)]     # fuse with skip connection
         for i in range(self.res_blocks - 1):
             layers.append(ResnetBlock(out_c, norm_groups=32))
-        layers.append(nn.Upsample(size=upsample_size, mode='nearest'))    # upsample
+        # layers.append(nn.Upsample(size=upsample_size, mode='nearest'))    # upsample
         layers.append(nn.Conv1d(out_c, out_c, 3, 1, 1))    # shrink
         return nn.ModuleList(layers)
     
@@ -93,7 +90,7 @@ class TrajUNet(nn.Module):
             x = torch.cat([x, down_outputs[-i-1]], dim=1)   # (B, C*2, L//2**i)
             for layer in up_stage[:-2]:
                 x = layer(x, embedding)
-            x = up_stage[-2](x)
+            x = F.interpolate(x, size=down_outputs[-i - 2].shape[-1], mode='nearest')
             x = up_stage[-1](x)
         return x
     
@@ -109,20 +106,28 @@ class TrajUNet(nn.Module):
         embedding = self.embed_block(time, cat_attr, num_attr)    # (B, 256, 1)
         x = self.stem(x)    # (B, stem_channels, L)
         down_outputs = self.__encoderForward(x, embedding)    # List of (B, C', L//2**i)
+        down_outputs.insert(0, x)
         x = self.mid_attn_block(down_outputs[-1], embedding)    # (B, C', L//2**i)
         x = self.__decoderForward(x, embedding, down_outputs)    # (B, C, L)
         return self.head(x)
-    
+
 
 if __name__ == "__main__":
-    model = TrajUNet(channel_schedule=[128, 128, 256, 512, 1024], traj_length=200, diffusion_steps=300, res_blocks=2).cuda()
-    x = torch.randn(1, 2, 200).cuda()
-    time = torch.tensor([0,], dtype=torch.long, device='cuda')
-    cat_attr = torch.tensor([[0, 0, 0, 0, 0],], dtype=torch.long, device='cuda')
-    num_attr = torch.tensor([[0, 0, 0],], dtype=torch.float, device='cuda')
-    y = model(x, time, cat_attr, num_attr)
-    print(y.shape)
+    model = TrajUNet(channel_schedule=[128, 128, 256, 512, 1024], diffusion_steps=500, res_blocks=2).cuda()
+    # for i in range(100, 210, 7):
+    #     x = torch.randn(1, 2, i).cuda()
+    #     time = torch.tensor([0,], dtype=torch.long, device='cuda')
+    #     cat_attr = torch.tensor([[0, 0, 0, 0, 0],], dtype=torch.long, device='cuda')
+    #     num_attr = torch.tensor([[0, 0, 0],], dtype=torch.float, device='cuda')
+    #     y = model(x, time, cat_attr, num_attr)
+    #     print(y.shape)
 
+    # 10.708994 ms
+
+    x = torch.randn(1, 2, 256).cuda()
+    time = torch.tensor([0, ], dtype=torch.long, device='cuda')
+    cat_attr = torch.tensor([[0, 0, 0, 0, 0], ], dtype=torch.long, device='cuda')
+    num_attr = torch.tensor([[0, 0, 0], ], dtype=torch.float, device='cuda')
     inferSpeedTest1K(model, x, time, cat_attr, num_attr)
 
 
